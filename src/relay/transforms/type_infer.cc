@@ -87,6 +87,32 @@ struct ResolvedTypeInfo {
   Array<Type> type_args = Array<Type>(ObjectPtr<Object>(nullptr));
 };
 
+Type DeDupType(const Type& e) {
+   class DeDupTypeMutator : public TypeMutator, public ExprMutator, public PatternMutator {
+    public:
+     TypeVar Fresh(const TypeVar& tv) {
+       TypeVar ret = TypeVar(tv->name_hint, tv->kind);
+       type_rename_[tv] = ret;
+       return ret;
+     }
+
+      Type VisitType(const Type& t) final { return t.defined() ? TypeMutator::VisitType(t) : t; }
+
+      Pattern VisitPattern(const Pattern& p) final { return PatternFunctor::VisitPattern(p); }
+
+      Type VisitType_(const TypeVarNode* op) final {
+       TypeVar v = GetRef<TypeVar>(op);
+       return type_rename_.count(v) != 0 ? type_rename_.at(v) : Fresh(v);
+     }
+
+     private:
+     std::unordered_map<TypeVar, TypeVar, ObjectPtrHash, ObjectPtrEqual> type_rename_;
+   };
+
+    Type ret = DeDupTypeMutator().VisitType(e);
+   return ret;
+}
+
 //
 // The inference algorithm can roughly be divided into three stages:
 // - Populate the constraints by visiting the expression (TypeInferencer.GetType)
@@ -106,6 +132,7 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
 
   // Infer the types inside of a function.
   Expr Infer(GlobalVar var, Function expr);
+  void GlobalInfer(IRModule updated_mod);
 
  private:
   // type resolver that maps back to type
@@ -173,8 +200,17 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
       this->EmitFatal(Diagnostic::Error(op->span) << "Cannot do type inference on global variables "
                                                   << "without a module");
     }
-    relay::Function e = Downcast<Function>(mod_->Lookup(var));
-    return e->checked_type();
+
+    CHECK(type_map_.find(var) == type_map_.end()) << var;
+
+    relay::Function f = Downcast<Function>(mod_->Lookup(var));
+    auto ty = f->func_type_annotation();
+
+    ResolvedTypeInfo& rti = type_map_[var];
+    rti.checked_type = ty;
+    CHECK(!type_map_[var].type_args.defined());
+
+    return Unify(ty, GetType(f), op->span);
   }
 
   Type VisitExpr_(const ConstantNode* op) final { return op->tensor_type(); }
@@ -408,7 +444,13 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
     if (type_info == type_map_.end()) {
       type_map_.insert({expr, ResolvedTypeInfo(Type(), type_args)});
     } else {
-      CHECK(!type_info->second.type_args.defined());
+      // CHECK(!type_info->second.type_args.defined()) << PrettyPrint(type_info->first) << std::endl 
+      //                                               << PrettyPrint(type_info->second.checked_type) << std::endl
+      //                                               << type_info->second.type_args << std::endl
+      //                                               << "replaced by" << type_args << std::endl;
+      if (type_info->second.type_args.defined()) {
+        CHECK(type_info->second.type_args == type_args);
+      }
       type_info->second.type_args = type_args;
     }
   }
@@ -499,7 +541,8 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
   }
 
   Type VisitExpr_(const FunctionNode* f) final {
-    solver_.Solve();
+    // TODO: why do we solve here?
+    // solver_.Solve();
     Array<Type> arg_types;
     for (auto param : f->params) {
       arg_types.push_back(GetType(param));
@@ -513,7 +556,8 @@ class TypeInferencer : private ExprFunctor<Type(const Expr&)>,
     }
     CHECK(rtype.defined());
     auto ret = FuncType(arg_types, rtype, f->type_params, {});
-    return solver_.Resolve(ret);
+    // return solver_.Resolve(ret);
+    return std::move(ret);
   }
 
   Type VisitExpr_(const RefCreateNode* op) final { return RelayRefType(GetType(op->value)); }
@@ -740,6 +784,41 @@ void AddGlobalTypes(IRModule mod) {
   }
 }
 
+
+void TypeInferencer::GlobalInfer(IRModule updated_mod) {
+  for (const auto& it : mod_->functions) {
+    if (auto* func_node = it.second.as<FunctionNode>()) {
+      Function f = GetRef<Function>(func_node);
+      GetType(it.first);
+      GetType(f);
+    }
+  }
+  Solve();
+  std::vector<std::pair<GlobalVar, Function> > updates;
+  for (const auto& it : mod_->functions) {
+    if (auto* func_node = it.second.as<FunctionNode>()) {
+      auto func = GetRef<Function>(func_node);
+
+      auto resolved_func = Downcast<Function>(Resolver(type_map_, &solver_).VisitExpr(func));
+      if (!WellFormed(resolved_func, this->diag_ctx)) {
+        this->diag_ctx.Emit(Diagnostic::Bug(func->span)
+                            << "the type checked function is malformed, please report this");
+      }
+      auto free_tvars = FreeTypeVars(resolved_func, mod_);
+      CHECK(free_tvars.size() == 0)
+          << "Found unbound type variables in " << resolved_func << ": " << free_tvars;
+      EnsureCheckedType(resolved_func);
+
+      it.first->checked_type_ = resolved_func->checked_type();
+      updates.push_back({it.first, resolved_func});
+    }
+  }
+
+  for (const auto& pair : updates) {
+    updated_mod->Add(pair.first, pair.second, true);
+  }
+}
+
 namespace transform {
 
 Pass InferType() {
@@ -754,50 +833,52 @@ Pass InferType() {
         pass_ctx->diag_ctx = DiagnosticContext::Default(updated_mod);
 
         // Add all the type annotations to the functions in the model.
+        // AddGlobalTypes(mod);
         AddGlobalTypes(mod);
+        auto inferencer = TypeInferencer(mod, pass_ctx->diag_ctx.value());
+        inferencer.GlobalInfer(updated_mod);
 
-        std::vector<std::pair<GlobalVar, Function> > updates;
-        for (const auto& it : updated_mod->functions) {
-          // Currently we don't type check TIR.
-          //
-          // The inferencer will only check Relay functions.
+        // std::vector<std::pair<GlobalVar, Function> > updates;
+        // for (const auto& it : updated_mod->functions) {
+        //   // Currently we don't type check TIR.
+        //   //
+        //   // The inferencer will only check Relay functions.
 
-          // In the future we plan a unified type checker
-          // that works on TIR and Relay at the same time.
-          if (auto* func_node = it.second.as<FunctionNode>()) {
-            auto func = GetRef<Function>(func_node);
+        //   // In the future we plan a unified type checker
+        //   // that works on TIR and Relay at the same time.
+        //   if (auto* func_node = it.second.as<FunctionNode>()) {
+        //     auto func = GetRef<Function>(func_node);
+        //     // If a function already has type information we can skip checking it.
+        //     // if (func->checked_type_.defined()) {
+        //     //   continue;
+        //     // }
 
-            // // If a function already has type information we can skip checking it.
-            // if (func->checked_type_.defined()) {
-            //   continue;
-            // }
+        //     // TODO(@jroesch): we should be able to move the type inferencer outside
+        //     // of this function but it seems to be more stateful then I expect.
+        //     auto inferencer = TypeInferencer(mod, pass_ctx->diag_ctx.value());
+        //     auto updated_func = inferencer.Infer(it.first, func);
 
-            // TODO(@jroesch): we should be able to move the type inferencer outside
-            // of this function but it seems to be more stateful then I expect.
-            auto inferencer = TypeInferencer(mod, pass_ctx->diag_ctx.value());
-            auto updated_func = inferencer.Infer(it.first, func);
+        //     pass_ctx->diag_ctx.value().Render();
 
-            pass_ctx->diag_ctx.value().Render();
+        //     // After we are done checking write the global type back
+        //     // into the global var.
+        //     it.first->checked_type_ = updated_func->checked_type();
 
-            // After we are done checking write the global type back
-            // into the global var.
-            it.first->checked_type_ = updated_func->checked_type();
+        //     if (!WellFormed(updated_func, pass_ctx->diag_ctx)) {
+        //       LOG(FATAL) << "The type checked intermediate representation is malformed";
+        //     }
 
-            if (!WellFormed(updated_func, pass_ctx->diag_ctx)) {
-              LOG(FATAL) << "The type checked intermediate representation is malformed";
-            }
+        //     auto free_tvars = FreeTypeVars(updated_func, mod);
+        //     CHECK(free_tvars.size() == 0)
+        //         << "Found unbound type variables in " << updated_func << ": " << free_tvars;
+        //     EnsureCheckedType(updated_func);
+        //     updates.push_back({it.first, Downcast<Function>(updated_func)});
+        //   }
+        // }
 
-            auto free_tvars = FreeTypeVars(updated_func, mod);
-            CHECK(free_tvars.size() == 0)
-                << "Found unbound type variables in " << updated_func << ": " << free_tvars;
-            EnsureCheckedType(updated_func);
-            updates.push_back({it.first, Downcast<Function>(updated_func)});
-          }
-        }
-
-        for (const auto& pair : updates) {
-          updated_mod->Add(pair.first, pair.second, true);
-        }
+        // for (const auto& pair : updates) {
+        //   updated_mod->Add(pair.first, pair.second, true);
+        // }
 
         return updated_mod;
       },
