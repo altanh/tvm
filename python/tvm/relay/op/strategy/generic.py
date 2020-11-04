@@ -1059,6 +1059,25 @@ def schedule_scatter_add(attrs, outs, target):
     with target:
         return topi.generic.schedule_scatter_add(outs)
 
+# scatter_nd
+@override_native_generic_func("scatter_nd_strategy")
+def scatter_nd_strategy(attrs, inputs, out_type, target):
+    """scatter_nd generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_scatter_nd(topi.scatter_nd), wrap_topi_schedule(topi.generic.schedule_extern),
+        name="scatter_nd.generic",
+    )
+    return strategy
+
+def wrap_compute_scatter_nd(topi_compute):
+    """Wrap scatter_nd topi compute"""
+
+    def _compute_scatter_nd(attrs, inputs, _):
+        return [topi_compute(inputs[0], inputs[1], attrs.out_shape)]
+
+    return _compute_scatter_nd
+
 
 # bitserial_conv2d
 def wrap_compute_bitserial_conv2d(topi_compute):
