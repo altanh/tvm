@@ -810,3 +810,9 @@ def arange_grad(orig, grad):
 def gather_nd_grad(orig, grad):
     data, indices = orig.args
     return [scatter_nd(grad, indices, data.checked_type.concrete_shape), zeros_like(indices)]
+
+
+@register_gradient("reshape_like")
+def reshape_like_grad(orig, grad):
+    data, shape_like = orig.args
+    return [reshape_like(grad, data), zeros_like(shape_like)]
