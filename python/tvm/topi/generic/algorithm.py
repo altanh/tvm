@@ -183,7 +183,7 @@ def _threefry(
                 (out_offset, tmp_offset) = (tmp_offset, out_offset)
 
 
-def threefry_generate(gen, out_shape):
+def threefry_generate_impl(gen, out_shape):
     """Generate a series of random values
 
     Notes
@@ -211,7 +211,7 @@ def threefry_generate(gen, out_shape):
     rand : Tensor[out_shape, uint64]
         Tensor of random numbers with shape `out_shape`.
     """
-    out_len = 1
+    out_len = tir.const(1)
     for s in out_shape:
         out_len *= s
     assert (
@@ -291,9 +291,42 @@ def threefry_generate(gen, out_shape):
         [gen],
         lambda ins, outs: gen_ir(ins[0], outs[0], outs[1]),
         out_buffers=[out_gen, out_array],
-        name="threefry_generate",
-        tag="threefry_generate",
+        name="threefry_generate_impl",
+        tag="threefry_generate_impl",
     )
+
+
+def threefry_generate(gen, out_shape):
+    # TODO(@altanh, @tkonolige): support symbolic shape
+    out_len = tir.const(1)
+    for s in out_shape:
+        out_len *= s
+    if out_len.value % 4 == 0:
+        return threefry_generate_impl(gen, out_shape)
+    else:
+        # round up to multiple of 4 and discard extras, unfortunately needs to copy
+        out_len_rounded = ((out_len + 3) // 4) * 4
+        out_gen, out_array_rounded = threefry_generate_impl(gen, (out_len_rounded,))
+
+        def gen_ir(out_array_rounded, out_array):
+            irb = ir_builder.create()
+            rounded_ptr = irb.buffer_ptr(out_array_rounded)
+            out_ptr = irb.buffer_ptr(out_array, (out_len,))
+            with irb.for_range(0, out_len, name="i", for_type="vectorize") as i:
+                out_ptr[i] = rounded_ptr[i]
+            return irb.get()
+
+        out_array = tvm.tir.decl_buffer(out_shape, name="out_array", dtype="uint64")
+        out_tensor = tvm.te.extern(
+            [out_array.shape],
+            [out_array_rounded],
+            lambda ins, outs: gen_ir(ins[0], outs[0]),
+            out_buffers=[out_array],
+            name="threefry_generate_trunc",
+            tag="threefry_generate_trunc",
+        )
+
+        return out_gen, out_tensor
 
 
 def _shift_right(irb, a, b, out_a, a_off, out_b, b_off):
@@ -400,3 +433,37 @@ def threefry_split(gen):
         name="threefry_split",
         tag="threefry_split",
     )
+
+
+def threefry_uniform(gen, out_shape, minval, maxval):
+    out_len = tir.const(1)
+    for s in out_shape:
+        out_len *= s
+    rand_range = maxval - minval
+
+    def gen_ir(random_bits, output):
+        irb = ir_builder.create()
+        random_ptr = irb.buffer_ptr(random_bits, shape=(out_len,))
+        output_ptr = irb.buffer_ptr(output, shape=(out_len,))
+        mantissa_mask = tir.const(0xFFFFFFFFFFFFF, dtype="uint64")
+        one_exp = tir.const(1023 << 52, dtype="uint64")
+
+        with irb.for_range(0, out_len, name="i", for_type="vectorize") as i:
+            output_ptr[i] = (mantissa_mask & random_ptr[i]) | one_exp
+        return irb.get()
+
+    _, random_bits = threefry_generate(gen, out_shape)
+    out_array = tir.decl_buffer(out_shape, name="out_array", dtype="uint64")
+    out_tensor = tvm.te.extern(
+        [out_array.shape],
+        [random_bits],
+        lambda ins, outs: gen_ir(ins[0], outs[0]),
+        out_buffers=[out_array],
+        name="threefry_uniform",
+        tag="threefry_uniform"
+    )
+    out_tensor = tvm.topi.reinterpret(out_tensor, dtype="float64")
+    # rescale and shift
+    out_tensor = out_tensor * tvm.topi.full((1,), dtype="float64", fill_value=rand_range)
+    out_tensor = out_tensor + tvm.topi.full((1,), dtype="float64", fill_value=minval - rand_range)
+    return out_tensor
