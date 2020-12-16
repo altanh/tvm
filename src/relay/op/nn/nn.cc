@@ -499,22 +499,25 @@ TVM_REGISTER_NODE_TYPE(DropoutAttrs);
 
 bool DropoutRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
                 const TypeReporter& reporter) {
-  ICHECK_EQ(types.size(), 2);
+  ICHECK_EQ(types.size(), 3);
   const auto* data = types[0].as<TensorTypeNode>();
   if (data == nullptr) return false;
+
+  const auto* gen = types[1].as<TensorTypeNode>();
+  if (gen == nullptr) return false;
 
   // dropout returns the original tensor with dropout applied
   // and a mask tensor (1.0 where element not dropped, 0.0 where dropped)
   auto ret_type = TensorType(data->shape, data->dtype);
-  reporter->Assign(types[1], TupleType(Array<Type>({ret_type, ret_type})));
+  reporter->Assign(types[2], TupleType(Array<Type>({ret_type, ret_type})));
   return true;
 }
 
-Expr MakeDropout(Expr data, double rate) {
+Expr MakeDropout(Expr data, Expr gen, double rate) {
   auto attrs = make_object<DropoutAttrs>();
   attrs->rate = rate;
   static const Op& op = Op::Get("nn.dropout");
-  return Call(op, {data}, Attrs(attrs), {});
+  return Call(op, {data, gen}, Attrs(attrs), {});
 }
 
 TVM_REGISTER_GLOBAL("relay.op.nn._make.dropout").set_body_typed(MakeDropout);
@@ -527,8 +530,9 @@ The whole array is rescaled by ``1/(1-p)`` to keep the expected sum of the input
 
 )code" TVM_ADD_FILELINE)
     .set_attrs_type<DropoutAttrs>()
-    .set_num_inputs(1)
+    .set_num_inputs(2)
     .add_argument("data", "Tensor", "Input to which dropout will be applied.")
+    .add_argument("gen", "Tensor", "The Threefry PRNG key.")
     .set_support_level(1)
     .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ElemwiseArbitraryLayout)
     .add_type_rel("Dropout", DropoutRel);

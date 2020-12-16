@@ -705,6 +705,11 @@ reg.register_broadcast_schedule("nn.dilate")
 reg.register_pattern("nn.dilate", OpPattern.INJECTIVE)
 
 
+# dropout
+reg.register_strategy("nn.dropout", strategy.dropout_strategy)
+reg.register_pattern("nn.dropout", OpPattern.OPAQUE)
+
+
 # cross_entropy_with_logits
 @reg.register_compute("nn.cross_entropy_with_logits")
 def compute_cross_entropy_with_logits(attrs, inputs, out_dtype):

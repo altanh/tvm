@@ -464,6 +464,6 @@ def threefry_uniform(gen, out_shape, minval, maxval):
     )
     out_tensor = tvm.topi.reinterpret(out_tensor, dtype="float64")
     # rescale and shift
-    out_tensor = out_tensor * tvm.topi.full((1,), dtype="float64", fill_value=rand_range)
-    out_tensor = out_tensor + tvm.topi.full((1,), dtype="float64", fill_value=minval - rand_range)
+    out_tensor = out_tensor * tir.const(rand_range, dtype="float64")
+    out_tensor = out_tensor + tir.const(minval - rand_range, dtype="float64")
     return out_tensor

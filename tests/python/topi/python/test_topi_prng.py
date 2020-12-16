@@ -43,6 +43,16 @@ def threefry_generate(target, ctx, gen, size):
     return out_gen.asnumpy(), rands.asnumpy()
 
 
+def threefry_uniform(target, ctx, gen, size, minval, maxval):
+    gen_placeholder = tvm.te.placeholder(gen.shape, name="gen", dtype="uint64")
+    rands_placeholder = tvm.topi.generic.threefry_uniform(gen_placeholder, size, minval, maxval)
+    s = tvm.topi.generic.schedule_extern([rands_placeholder])
+    f = tvm.build(s, [gen_placeholder, rands_placeholder])
+    rands = tvm.nd.array(np.zeros(size, dtype="float64"))
+    f(tvm.nd.array(gen), rands)
+    return rands.asnumpy()
+
+
 @tvm.testing.parametrize_targets
 def test_threefry_split(target, ctx):
     # test that results of split do not equal eachother or the input
@@ -85,11 +95,12 @@ def test_threefry_split(target, ctx):
 @tvm.testing.parametrize_targets
 def test_threefry_generate(target, ctx):
     gen = tvm.relay.threefry_seed(0).data.asnumpy()
+    out_shape = (101,)
 
     # check that we can generate some data
-    a, rands = threefry_generate(target, ctx, gen, (100,))
+    a, rands = threefry_generate(target, ctx, gen, out_shape)
     assert (
-        rands.shape[0] == 100 and len(rands.shape) == 1
+        rands.shape == out_shape
     ), "Output shape should match requested shape"
 
     # check that gen out does not equal input
@@ -112,5 +123,12 @@ def test_threefry_generate(target, ctx):
 
 
 if __name__ == "__main__":
-    test_threefry_split(tvm.target.Target("llvm"), tvm.context("cpu"))
-    test_threefry_generate(tvm.target.Target("llvm"), tvm.context("cpu"))
+    # test_threefry_split(tvm.target.Target("llvm"), tvm.context("cpu"))
+    # test_threefry_generate(tvm.target.Target("llvm"), tvm.context("cpu"))
+    target, ctx = tvm.target.Target("llvm"), tvm.context("cpu")
+    gen = tvm.relay.threefry_seed(0).data.asnumpy()
+    shape = (200,)
+    minval, maxval = -1.0, 1.0
+    rands = threefry_uniform(target, ctx, gen, shape, minval, maxval)
+    # print(rands)
+    import pdb; pdb.set_trace()

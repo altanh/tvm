@@ -1659,7 +1659,7 @@ def l2_normalize(data, eps, axis=None):
     return _make.l2_normalize(data, eps, axis)
 
 
-def dropout(data, rate=0.5):
+def dropout(data, gen, rate=0.5):
     """Applies the dropout operation to the input array.
 
     During training, each element of the input is set to zero with
@@ -1679,10 +1679,10 @@ def dropout(data, rate=0.5):
     result : tvm.relay.Expr
         The result of dropout
     """
-    return expr.TupleWrapper(dropout_raw(data, rate), 2)[0]
+    return expr.TupleWrapper(dropout_raw(data, gen, rate), 2)[0]
 
 
-def dropout_raw(data, rate=0.5):
+def dropout_raw(data, gen, rate=0.5):
     """Applies the dropout operation to the input array.
 
     During training, each element of the input is set to zero with
@@ -1702,7 +1702,7 @@ def dropout_raw(data, rate=0.5):
     result : tvm.relay.Expr
         The result of dropout
     """
-    return _make.dropout(data, rate)
+    return _make.dropout(data, gen, rate)
 
 
 def batch_norm(

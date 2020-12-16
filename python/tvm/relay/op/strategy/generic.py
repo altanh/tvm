@@ -1308,3 +1308,24 @@ def threefry_split_strategy(attrs, inputs, out_type, target):
         name="threefry_split.generic",
     )
     return strategy
+
+
+def wrap_compute_dropout(topi_compute):
+    """Wrap dropout topi compute"""
+
+    def _compute_dropout(attrs, inputs, _):
+        return topi_compute(inputs[0], inputs[1], attrs.rate)
+
+    return _compute_dropout
+
+
+@override_native_generic_func("dropout_strategy")
+def dropout_strategy(attrs, inputs, out_type, target):
+    """dropout generic strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_dropout(topi.nn.dropout),
+        wrap_topi_schedule(topi.generic.schedule_extern),
+        name="dropout.generic",
+    )
+    return strategy
